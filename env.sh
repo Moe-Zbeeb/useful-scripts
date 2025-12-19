@@ -40,12 +40,18 @@ pip install \
   tiktoken \
   einops
 
+echo "Installing vLLM"
+pip install vllm
+
 echo "Final verification"
 python - <<'PY'
 import torch, transformers
+import vllm
+
 print("CUDA available:", torch.cuda.is_available())
 print("Torch:", torch.__version__)
 print("Transformers:", transformers.__version__)
+print("vLLM:", vllm.__version__)
 
 model = transformers.AutoModel.from_pretrained("bert-base-uncased")
 print("Loaded:", model.__class__.__name__)
