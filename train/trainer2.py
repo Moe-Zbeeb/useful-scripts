@@ -1,57 +1,85 @@
-# CUDA_VISIBLE_DEVICES=0,1,2,3 TOKENIZERS_PARALLELISM=false torchrun --standalone --nnodes=1 --nproc_per_node=4 --master_port=29517 /home/zbibm/Translation/trl/trainer.py
+#!/usr/bin/env python3
+
+from trl import SFTConfig, SFTTrainer
 from datasets import load_dataset
-from trl import SFTTrainer, SFTConfig
 from transformers import AutoTokenizer
-import torch, os
 
-MODEL = "/home/zbibm/Models_Translation/trained_Qwen_3b_1M/"
-OUT   = "/home/zbibm/Models/checkpoint3B_1M_extended_10epoch"
-TRAIN = "/home/zbibm/Translation/data/training_IFT/IFT_opus100_en_ar_train.jsonl"
+print("Loading dataset...")
+dataset = load_dataset(
+    "json",
+    data_files="zbeeb_SFT1_arabic_Safety/activate_training10k_upgraded.jsonl",
+    split="train"
+)
+print(f"✓ Loaded {len(dataset)} examples")
 
-tok = AutoTokenizer.from_pretrained(MODEL, use_fast=True)
-if tok.pad_token_id is None and tok.eos_token_id is not None:
-    tok.pad_token = tok.eos_token
+print("Loading tokenizer and formatting dataset...")
+tokenizer = AutoTokenizer.from_pretrained("./models/jais-adapted-7b-chat", trust_remote_code=True)
 
-train = load_dataset("json", data_files=TRAIN, split="train")
-train = train.map(lambda x: {
-    "prompt": x["prompt"].strip(),
-    "completion": x["completion"].strip()
-})
+def format_chat(example):
+    messages = [
+        {"role": "system", "content": "أنت مساعد مفيد. اتبع سياسات السلامة وكن واضحًا ومختصرًا."},
+        {"role": "user", "content": example["prompt_ar"]},
+        {"role": "assistant", "content": example["response_ar"]},
+    ]
+    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+    return {"text": text}
 
-cfg = SFTConfig(
-    output_dir=OUT,
-    overwrite_output_dir=True,
-    per_device_train_batch_size=1,
-    gradient_accumulation_steps=16,
-    gradient_checkpointing=True, 
-    num_train_epochs=10,
-    bf16=True,
-    tf32=True,
-    learning_rate=2e-5,
-    warmup_ratio=0.03,
+dataset = dataset.map(format_chat, num_proc=4)
+print(f"✓ Formatted {len(dataset)} examples")
+
+config = SFTConfig(
+    output_dir="./output",
+    max_steps=10,
+    per_device_train_batch_size=8,
+    gradient_accumulation_steps=2,
+    learning_rate=1e-5,
     lr_scheduler_type="linear",
-    max_grad_norm=1.0,
-    max_length=2048,
-    packing=True,
+    warmup_steps=5,
+    logging_steps=2,
+    save_steps=10,
+    save_total_limit=1,
     completion_only_loss=True,
-    eos_token="<|im_end|>",
-    model_init_kwargs={"dtype": torch.bfloat16},
-    logging_steps=10,
-    save_strategy="steps",
-    save_steps=500,
-    save_total_limit=3,
-    report_to="none",
-    ddp_find_unused_parameters=False
+    optim="paged_adamw_8bit",
+    gradient_checkpointing=True,
+    fp16=True,
+    max_grad_norm=1.0,
+    seed=42,
+    remove_unused_columns=True,
+    dataloader_num_workers=4,
+    report_to=["tensorboard"],
+    logging_dir="./logs",
 )
 
+print("Initializing trainer...")
 trainer = SFTTrainer(
-    model=MODEL,
-    args=cfg,
-    processing_class=tok,
-    train_dataset=train
+    model="./models/jais-adapted-7b-chat",
+    args=config,
+    train_dataset=dataset,
 )
 
-trainer.train()
-trainer.save_model()
-if trainer.processing_class:
-    trainer.processing_class.save_pretrained(OUT) 
+print("\n" + "="*60)
+print("TRAINING CONFIGURATION (Single GPU)")
+print("="*60)
+print(f"Dataset: {len(dataset)} examples")
+print(f"Model: jais-adapted-7b-chat")
+print(f"Max steps: 10")
+print(f"Batch size: 8")
+print(f"Gradient accumulation: 2")
+print(f"Effective batch size: 16")
+print(f"Learning rate: 1e-5")
+print(f"Warmup steps: 5")
+print(f"Save steps: 10")
+print("="*60 + "\n")
+
+print("Starting training...\n")
+train_result = trainer.train()
+
+print("\nSaving model...")
+trainer.save_model("./output/final-model")
+
+print("\n" + "="*60)
+print("TRAINING COMPLETE!")
+print("="*60)
+print(f"Final loss: {train_result.training_loss:.4f}")
+print(f"Model saved to: ./output/final-model")
+print("="*60)
