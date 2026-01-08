@@ -1,57 +1,89 @@
-# CUDA_VISIBLE_DEVICES=1,2,3 TOKENIZERS_PARALLELISM=false torchrun --standalone --nnodes=1 --nproc_per_node=4 --master_port=29517 /home/zbibm/Translation/trl/trainer.py
+#!/usr/bin/env python3
+
+from trl import SFTConfig, SFTTrainer
 from datasets import load_dataset
-from trl import SFTTrainer, SFTConfig
 from transformers import AutoTokenizer
-import torch, os
 
-MODEL = "/home/zbibm/zbeeb/Translation_3B_cot_3epochs"
-OUT   = "/home/zbibm/Models/traincot3epoch_extended_data"
-TRAIN = "/home/zbibm/Translation/data/training_IFT/translation_data/think.jsonl"
+print("Loading dataset...")
+dataset = load_dataset(
+    "json",
+    data_files="/home/zbibm/Safety-Arabic/Training Corpus/100%refusals.jsonl",
+    split="train"
+)
+print(f"✓ Loaded {len(dataset)} examples")
 
-tok = AutoTokenizer.from_pretrained(MODEL, use_fast=True)
-if tok.pad_token_id is None and tok.eos_token_id is not None:
-    tok.pad_token = tok.eos_token
+print("Loading tokenizer and formatting dataset...")
+tokenizer = AutoTokenizer.from_pretrained("/home/zbibm/Safety-Arabic/models/Fanar-1-9B")
 
-train = load_dataset("json", data_files=TRAIN, split="train")
-train = train.map(lambda x: {
-    "prompt": x["prompt"].strip(),
-    "completion": x["completion"].strip()
-})
+def format_chat(example):
+    # Check if tokenizer has a chat template
+    if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is not None:
+        messages = [
+            {"role": "system", "content": "أنت مساعد مفيد. اتبع سياسات السلامة وكن واضحًا ومختصرًا."},
+            {"role": "user", "content": example["prompt_ar"]},
+            {"role": "assistant", "content": example["response_ar"]},
+        ]
+        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+    else:
+        # For models without chat template, format manually
+        text = f"أنت مساعد مفيد. اتبع سياسات السلامة وكن واضحًا ومختصرًا.\n\n{example['prompt_ar']}\n\n{example['response_ar']}"
+    return {"text": text}
 
-cfg = SFTConfig(
-    output_dir=OUT,
-    overwrite_output_dir=True,
-    per_device_train_batch_size=2,
-    gradient_accumulation_steps=16,
-    gradient_checkpointing=True, 
-    num_train_epochs=3,
-    bf16=True,
-    tf32=True,
+dataset = dataset.map(format_chat, num_proc=4)
+print(f"✓ Formatted {len(dataset)} examples")
+
+config = SFTConfig(
+    output_dir="./output",
+    num_train_epochs=1,
+    per_device_train_batch_size=16, #BS = 16x2
+    gradient_accumulation_steps=2,
     learning_rate=1e-5,
-    warmup_ratio=0.03,
     lr_scheduler_type="linear",
-    max_grad_norm=1.0,
-    max_length=4048,
-    packing=True,
+    warmup_steps=5,
+    logging_steps=2,
+    save_steps=50,
+    save_total_limit=None,  # this means save it all ... 
     completion_only_loss=True,
-    eos_token="<|im_end|>",
-    model_init_kwargs={"dtype": torch.bfloat16},
-    logging_steps=10,
-    save_strategy="steps",
-    save_steps=500,
-    save_total_limit=3,
-    report_to="none",
-    ddp_find_unused_parameters=False
+    optim="paged_adamw_8bit",
+    gradient_checkpointing=True,
+    fp16=True,
+    max_grad_norm=1.0,
+    seed=42,
+    remove_unused_columns=True,
+    dataloader_num_workers=2,
+    report_to=["tensorboard"],
+    logging_dir="./logs",
 )
 
+print("Initializing trainer...")
 trainer = SFTTrainer(
-    model=MODEL,
-    args=cfg,
-    processing_class=tok,
-    train_dataset=train
+    model="/home/zbibm/Safety-Arabic/models/Fanar-1-9B",
+    args=config,
+    train_dataset=dataset,
 )
 
-trainer.train()
-trainer.save_model()
-if trainer.processing_class:
-    trainer.processing_class.save_pretrained(OUT)
+print("\n" + "="*60)
+print("="*60)
+print(f"Dataset: {len(dataset)} examples")
+print(f"Model: /home/zbibm/Safety-Arabic/models/Fanar-1-9B")
+print(f"Epochs: 1")
+print(f"Batch size: 16")
+print(f"Gradient accumulation: 2")
+print(f"Effective batch size: 32")
+print(f"Learning rate: 1e-5")
+print(f"Warmup steps: 5")
+print(f"Save steps: 50")
+print("="*60 + "\n")
+
+print("Starting training...\n")
+train_result = trainer.train()
+
+print("\nSaving model...")
+trainer.save_model("./output/final-model")
+
+print("\n" + "="*60)
+print("TRAINING COMPLETE!")
+print("="*60)
+print(f"Final loss: {train_result.training_loss:.4f}")
+print(f"Model saved to: ./output/final-model")
+print("="*60)
